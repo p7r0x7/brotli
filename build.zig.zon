@@ -1,0 +1,5 @@
+.{
+    .name = "brotli",
+    .version = "1.1.0",
+    .paths = .{ "c", "build.zig", "build.zig.zon", "update.sh", "verify.sh" },
+}

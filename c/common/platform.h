@@ -14,10 +14,11 @@
     * BROTLI_BUILD_LITTLE_ENDIAN forces to use little-endian optimizations
     * BROTLI_BUILD_NO_RBIT disables "rbit" optimization for ARM CPUs
     * BROTLI_BUILD_NO_UNALIGNED_READ_FAST forces off the fast-unaligned-read
-      optimizations (mainly for testing purposes).
+      optimizations (mainly for testing purposes)
     * BROTLI_DEBUG dumps file name and line number when decoder detects stream
       or memory error
     * BROTLI_ENABLE_LOG enables asserts and dumps various state information
+    * BROTLI_ENABLE_DUMP overrides default "dump" behaviour
 */
 
 #ifndef BROTLI_COMMON_PLATFORM_H_
@@ -28,17 +29,7 @@
 #include <brotli/port.h>
 #include <brotli/types.h>
 
-#if defined(OS_LINUX) || defined(OS_CYGWIN) || defined(__EMSCRIPTEN__)
-#include <endian.h>
-#elif defined(OS_FREEBSD)
-#include <machine/endian.h>
-#elif defined(OS_MACOSX)
-#include <machine/endian.h>
-/* Let's try and follow the Linux convention */
-#define BROTLI_X_BYTE_ORDER BYTE_ORDER
-#define BROTLI_X_LITTLE_ENDIAN LITTLE_ENDIAN
-#define BROTLI_X_BIG_ENDIAN BIG_ENDIAN
-#endif
+#include <sys/types.h>  /* should include endian.h for us */
 
 #if BROTLI_MSVC_VERSION_CHECK(18, 0, 0)
 #include <intrin.h>
@@ -247,13 +238,12 @@ OR:
 #define BROTLI_LITTLE_ENDIAN 1
 #elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 #define BROTLI_BIG_ENDIAN 1
-#elif defined(BROTLI_X_BYTE_ORDER)
-#if BROTLI_X_BYTE_ORDER == BROTLI_X_LITTLE_ENDIAN
+/* Likely target platform is iOS / OSX. */
+#elif defined(BYTE_ORDER) && (BYTE_ORDER == LITTLE_ENDIAN)
 #define BROTLI_LITTLE_ENDIAN 1
-#elif BROTLI_X_BYTE_ORDER == BROTLI_X_BIG_ENDIAN
+#elif defined(BYTE_ORDER) && (BYTE_ORDER == BIG_ENDIAN)
 #define BROTLI_BIG_ENDIAN 1
 #endif
-#endif  /* BROTLI_X_BYTE_ORDER */
 
 #if !defined(BROTLI_LITTLE_ENDIAN)
 #define BROTLI_LITTLE_ENDIAN 0
@@ -261,12 +251,6 @@ OR:
 
 #if !defined(BROTLI_BIG_ENDIAN)
 #define BROTLI_BIG_ENDIAN 0
-#endif
-
-#if defined(BROTLI_X_BYTE_ORDER)
-#undef BROTLI_X_BYTE_ORDER
-#undef BROTLI_X_LITTLE_ENDIAN
-#undef BROTLI_X_BIG_ENDIAN
 #endif
 
 #if defined(BROTLI_BUILD_NO_UNALIGNED_READ_FAST)
@@ -407,14 +391,24 @@ static BROTLI_INLINE void BROTLI_UNALIGNED_STORE_PTR(void* p, const void* v) {
 #endif
 
 #if defined(BROTLI_DEBUG) || defined(BROTLI_ENABLE_LOG)
+#define BROTLI_ENABLE_DUMP_DEFAULT 1
 #define BROTLI_DCHECK(x) assert(x)
+#else
+#define BROTLI_ENABLE_DUMP_DEFAULT 0
+#define BROTLI_DCHECK(x)
+#endif
+
+#if !defined(BROTLI_ENABLE_DUMP)
+#define BROTLI_ENABLE_DUMP BROTLI_ENABLE_DUMP_DEFAULT
+#endif
+
+#if BROTLI_ENABLE_DUMP
 static BROTLI_INLINE void BrotliDump(const char* f, int l, const char* fn) {
   fprintf(stderr, "%s:%d (%s)\n", f, l, fn);
   fflush(stderr);
 }
 #define BROTLI_DUMP() BrotliDump(__FILE__, __LINE__, __FUNCTION__)
 #else
-#define BROTLI_DCHECK(x)
 #define BROTLI_DUMP() (void)(0)
 #endif
 
@@ -464,7 +458,7 @@ BROTLI_MIN_MAX(size_t) BROTLI_MIN_MAX(uint32_t) BROTLI_MIN_MAX(uint8_t)
     BROTLI_INTEL_VERSION_CHECK(16, 0, 0)
 #define BROTLI_TZCNT64 __builtin_ctzll
 #elif BROTLI_MSVC_VERSION_CHECK(18, 0, 0)
-#if defined(BROTLI_TARGET_X64)
+#if defined(BROTLI_TARGET_X64) && !defined(_M_ARM64EC)
 #define BROTLI_TZCNT64 _tzcnt_u64
 #else /* BROTLI_TARGET_X64 */
 static BROTLI_INLINE uint32_t BrotliBsf64Msvc(uint64_t x) {
@@ -522,8 +516,23 @@ BROTLI_UNUSED_FUNCTION void BrotliSuppressUnusedFunctions(void) {
   BROTLI_UNUSED(&brotli_max_uint8_t);
   BROTLI_UNUSED(&BrotliDefaultAllocFunc);
   BROTLI_UNUSED(&BrotliDefaultFreeFunc);
-#if defined(BROTLI_DEBUG) || defined(BROTLI_ENABLE_LOG)
+#if BROTLI_ENABLE_DUMP
   BROTLI_UNUSED(&BrotliDump);
+#endif
+
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_I86)) && !defined(_M_ARM64EC)  /* _mm_prefetch() is not defined outside of x86/x64 */
+#  include <mmintrin.h>   /* https://msdn.microsoft.com/fr-fr/library/84szxsww(v=vs.90).aspx */
+#  define PREFETCH_L1(ptr)  _mm_prefetch((const char*)(ptr), _MM_HINT_T0)
+#  define PREFETCH_L2(ptr)  _mm_prefetch((const char*)(ptr), _MM_HINT_T1)
+#elif BROTLI_GNUC_HAS_BUILTIN(__builtin_prefetch, 3, 1, 0)
+#  define PREFETCH_L1(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 3 /* locality */)
+#  define PREFETCH_L2(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 2 /* locality */)
+#elif defined(__aarch64__)
+#  define PREFETCH_L1(ptr)  do { __asm__ __volatile__("prfm pldl1keep, %0" ::"Q"(*(ptr))); } while (0)
+#  define PREFETCH_L2(ptr)  do { __asm__ __volatile__("prfm pldl2keep, %0" ::"Q"(*(ptr))); } while (0)
+#else
+#  define PREFETCH_L1(ptr) do { (void)(ptr); } while (0)  /* disabled */
+#  define PREFETCH_L2(ptr) do { (void)(ptr); } while (0)  /* disabled */
 #endif
 }
 
