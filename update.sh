@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
 
+set -eu
 git remote add upstream https://github.com/google/brotli.git || true
 git fetch upstream
 git merge upstream/master || true
