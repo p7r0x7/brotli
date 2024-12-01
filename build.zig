@@ -1,14 +1,13 @@
-const std = @import("std");
+const Build = @import("std").Build;
+const builtin = @import("std").builtin;
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    b.enable_wine = target.result.os.tag == .windows and target.result.cpu.arch == .x86_64;
+    b.enable_rosetta = target.result.os.tag == .macos and target.result.cpu.arch == .x86_64;
 
-    const lib = b.addStaticLibrary(.{
-        .name = "brotli",
-        .target = target,
-        .optimize = optimize,
-    });
+    const lib = b.addStaticLibrary(.{ .name = "brotli", .target = target, .optimize = optimize });
 
     lib.linkLibC();
     lib.addIncludePath(b.path("c/include"));
@@ -23,6 +22,11 @@ pub fn build(b: *std.Build) void {
     }
 
     b.installArtifact(lib);
+
+    const brotli = executable(b, "brotli", null, target, optimize);
+    brotli.linkLibrary(lib);
+    brotli.addCSourceFile(.{ .file = b.path("c/tools/brotli.c"), .flags = &.{} });
+    b.installArtifact(brotli);
 }
 
 const sources = [_][]const u8{
@@ -57,4 +61,24 @@ const sources = [_][]const u8{
     "c/enc/metablock.c",
     "c/enc/static_dict.c",
     "c/enc/utf8_util.c",
+    "c/tools/brotli.c",
 };
+
+fn executable(b: *Build, name: []const u8, root_path: ?[]const u8, target: Build.ResolvedTarget, optimize: builtin.OptimizeMode) *Build.Step.Compile {
+    const exe = b.addExecutable(.{
+        .error_tracing = optimize == .ReleaseSafe or optimize == .Debug,
+        .strip = optimize == .ReleaseFast or optimize == .ReleaseSmall,
+        .omit_frame_pointer = optimize != .Debug,
+        .root_source_file = if (root_path) |v| b.path(v) else null,
+        .unwind_tables = optimize == .Debug,
+        .optimize = optimize,
+        .target = target,
+        .name = name,
+        .pic = true,
+    });
+    exe.want_lto = !target.result.isDarwin(); // https://github.com/ziglang/zig/issues/8680
+    exe.compress_debug_sections = .zstd;
+    exe.link_function_sections = true;
+    exe.link_gc_sections = true;
+    return exe;
+}
